@@ -3,6 +3,8 @@ package dto
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+
 	"one-api/types"
 )
 
@@ -84,37 +86,204 @@ type ChatCompletionsStreamResponseChoice struct {
 }
 
 type ChatCompletionsStreamResponseChoiceDelta struct {
-	Content          *string            `json:"content,omitempty"`
-	ReasoningContent *string            `json:"reasoning_content,omitempty"`
-	Reasoning        *string            `json:"reasoning,omitempty"`
-	Role             string             `json:"role,omitempty"`
-	ToolCalls        []ToolCallResponse `json:"tool_calls,omitempty"`
+	Content          *string                            `json:"content,omitempty"`
+	Contents         []ChatCompletionsStreamContentItem `json:"-"`
+	ReasoningContent *string                            `json:"reasoning_content,omitempty"`
+	Reasoning        *string                            `json:"reasoning,omitempty"`
+	Role             string                             `json:"role,omitempty"`
+	ToolCalls        []ToolCallResponse                 `json:"tool_calls,omitempty"`
+	rawContent       json.RawMessage                    `json:"-"`
+}
+
+type ChatCompletionsStreamContentItem struct {
+	Type        string                                 `json:"type,omitempty"`
+	Text        string                                 `json:"text,omitempty"`
+	Delta       *ChatCompletionsStreamContentDelta     `json:"delta,omitempty"`
+	Reasoning   *ChatCompletionsStreamContentReasoning `json:"reasoning,omitempty"`
+	Thinking    string                                 `json:"thinking,omitempty"`
+	PartialJSON *string                                `json:"partial_json,omitempty"`
+}
+
+type ChatCompletionsStreamContentDelta struct {
+	Text        string  `json:"text,omitempty"`
+	PartialJSON *string `json:"partial_json,omitempty"`
+}
+
+type ChatCompletionsStreamContentReasoning struct {
+	Text string `json:"text,omitempty"`
+}
+
+func (c *ChatCompletionsStreamResponseChoiceDelta) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		ReasoningContent *string            `json:"reasoning_content,omitempty"`
+		Reasoning        *string            `json:"reasoning,omitempty"`
+		Role             string             `json:"role,omitempty"`
+		ToolCalls        []ToolCallResponse `json:"tool_calls,omitempty"`
+		Content          json.RawMessage    `json:"content,omitempty"`
+	}
+	var aux alias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	c.Content = nil
+	c.Contents = nil
+	c.rawContent = aux.Content
+	c.ReasoningContent = aux.ReasoningContent
+	c.Reasoning = aux.Reasoning
+	c.Role = aux.Role
+	c.ToolCalls = aux.ToolCalls
+
+	if len(aux.Content) == 0 || string(aux.Content) == "null" {
+		return nil
+	}
+
+	var strContent string
+	if err := json.Unmarshal(aux.Content, &strContent); err == nil {
+		c.Content = &strContent
+		return nil
+	}
+
+	var listContent []ChatCompletionsStreamContentItem
+	if err := json.Unmarshal(aux.Content, &listContent); err == nil {
+		c.Contents = listContent
+		return nil
+	}
+
+	var singleContent ChatCompletionsStreamContentItem
+	if err := json.Unmarshal(aux.Content, &singleContent); err == nil {
+		c.Contents = []ChatCompletionsStreamContentItem{singleContent}
+		return nil
+	}
+
+	// keep raw content for potential re-marshal even if parsing fails
+	return nil
+}
+
+func (c ChatCompletionsStreamResponseChoiceDelta) MarshalJSON() ([]byte, error) {
+	type alias struct {
+		ReasoningContent *string            `json:"reasoning_content,omitempty"`
+		Reasoning        *string            `json:"reasoning,omitempty"`
+		Role             string             `json:"role,omitempty"`
+		ToolCalls        []ToolCallResponse `json:"tool_calls,omitempty"`
+	}
+
+	base := alias{
+		ReasoningContent: c.ReasoningContent,
+		Reasoning:        c.Reasoning,
+		Role:             c.Role,
+		ToolCalls:        c.ToolCalls,
+	}
+
+	content := c.rawContent
+	switch {
+	case len(content) > 0:
+	case c.Content != nil:
+		b, err := json.Marshal(c.Content)
+		if err != nil {
+			return nil, err
+		}
+		content = b
+	case len(c.Contents) > 0:
+		b, err := json.Marshal(c.Contents)
+		if err != nil {
+			return nil, err
+		}
+		content = b
+	}
+
+	if len(content) == 0 || string(content) == "null" {
+		return json.Marshal(base)
+	}
+
+	return json.Marshal(struct {
+		alias
+		Content json.RawMessage `json:"content,omitempty"`
+	}{
+		alias:   base,
+		Content: content,
+	})
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) SetContentString(s string) {
 	c.Content = &s
+	c.Contents = nil
+	c.rawContent = nil
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) GetContentString() string {
-	if c.Content == nil {
+	if c.Content != nil {
+		return *c.Content
+	}
+	if len(c.Contents) == 0 {
 		return ""
 	}
-	return *c.Content
+	var builder strings.Builder
+	for _, item := range c.Contents {
+		text := item.textValue()
+		if text == "" {
+			continue
+		}
+		lowerType := strings.ToLower(item.Type)
+		if lowerType == "" || strings.Contains(lowerType, "text") || strings.Contains(lowerType, "output") || strings.Contains(lowerType, "message") || strings.Contains(lowerType, "assistant") {
+			builder.WriteString(text)
+			continue
+		}
+		if !(strings.Contains(lowerType, "reason") || strings.Contains(lowerType, "think") || strings.Contains(lowerType, "tool")) {
+			builder.WriteString(text)
+		}
+	}
+	return builder.String()
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) GetReasoningContent() string {
-	if c.ReasoningContent == nil && c.Reasoning == nil {
-		return ""
-	}
-	if c.ReasoningContent != nil {
+	if c.ReasoningContent != nil && *c.ReasoningContent != "" {
 		return *c.ReasoningContent
 	}
-	return *c.Reasoning
+	if c.Reasoning != nil && *c.Reasoning != "" {
+		return *c.Reasoning
+	}
+	if len(c.Contents) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	for _, item := range c.Contents {
+		lowerType := strings.ToLower(item.Type)
+		if strings.Contains(lowerType, "reason") || strings.Contains(lowerType, "think") {
+			if text := item.reasoningValue(); text != "" {
+				builder.WriteString(text)
+			}
+		}
+	}
+	return builder.String()
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) SetReasoningContent(s string) {
 	c.ReasoningContent = &s
 	//c.Reasoning = &s
+}
+
+func (i ChatCompletionsStreamContentItem) textValue() string {
+	if i.Text != "" {
+		return i.Text
+	}
+	if i.Delta != nil && i.Delta.Text != "" {
+		return i.Delta.Text
+	}
+	return ""
+}
+
+func (i ChatCompletionsStreamContentItem) reasoningValue() string {
+	if i.Thinking != "" {
+		return i.Thinking
+	}
+	if i.Reasoning != nil && i.Reasoning.Text != "" {
+		return i.Reasoning.Text
+	}
+	if i.Delta != nil && i.Delta.Text != "" {
+		return i.Delta.Text
+	}
+	return ""
 }
 
 type ToolCallResponse struct {
