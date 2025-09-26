@@ -346,7 +346,13 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 					}
 				}
 			} else if message.IsStringContent() && message.ToolCalls == nil {
-				claudeMessage.Content = message.StringContent()
+				textContent := message.StringContent()
+				claudeMessage.Content = []dto.ClaudeMediaMessage{
+					{
+						Type: "text",
+						Text: common.GetPointer[string](textContent),
+					},
+				}
 			} else {
 				claudeMediaMessages := make([]dto.ClaudeMediaMessage, 0)
 				for _, mediaMessage := range message.ParseContent() {
@@ -395,6 +401,16 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 							Input: inputObj,
 						})
 					}
+				}
+				if len(claudeMediaMessages) == 0 {
+					fallbackText := message.StringContent()
+					if fallbackText == "" {
+						fallbackText = " "
+					}
+					claudeMediaMessages = append(claudeMediaMessages, dto.ClaudeMediaMessage{
+						Type: "text",
+						Text: common.GetPointer[string](fallbackText),
+					})
 				}
 				claudeMessage.Content = claudeMediaMessages
 			}
